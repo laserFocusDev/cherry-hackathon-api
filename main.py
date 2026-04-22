@@ -5,27 +5,35 @@ app = FastAPI()
 
 
 def extract_expression(query: str):
-    match = re.search(r'(\d+(?:\s*[\+\-\*\/]\s*\d+)+)', query)
+    # Normalize unicode minus/multiply signs
+    query = query.replace('\u2212', '-').replace('\u00d7', '*').replace('\u00f7', '/')
+    # Support decimals in addition to integers
+    match = re.search(r'(\d+(?:\.\d+)?(?:\s*[\+\-\*\/]\s*\d+(?:\.\d+)?)+)', query)
     if match:
         return match.group(1)
     return None
 
 
 def safe_eval(expr: str):
+    # Remove all spaces before eval
+    expr_clean = re.sub(r'\s+', '', expr)
     try:
-        return eval(expr)
-    except:
+        result = eval(expr_clean, {"__builtins__": {}}, {})
+        return result
+    except Exception:
         return None
 
 
 def get_operation(expr: str):
-    if "+" in expr:
+    # Strip spaces to reliably detect operator
+    expr_clean = re.sub(r'\s+', '', expr)
+    if '+' in expr_clean:
         return "sum"
-    elif "-" in expr:
+    elif '-' in expr_clean:
         return "difference"
-    elif "*" in expr:
+    elif '*' in expr_clean:
         return "product"
-    elif "/" in expr:
+    elif '/' in expr_clean:
         return "quotient"
     return "result"
 
@@ -39,9 +47,14 @@ def solve_math(query: str):
     if result is None:
         return None
 
-    # clean float
-    if isinstance(result, float) and result.is_integer():
-        result = int(result)
+    # Avoid division by zero or inf/nan
+    if isinstance(result, float):
+        if result != result or result in (float('inf'), float('-inf')):
+            return None
+        if result.is_integer():
+            result = int(result)
+        else:
+            result = round(result, 10)
 
     operation = get_operation(expr)
 

@@ -3,72 +3,47 @@ import re
 
 app = FastAPI()
 
+# Precompile regex at module load time
+_EXPR_RE = re.compile(r'(\d+(?:\.\d+)?(?:\s*[+\-*/]\s*\d+(?:\.\d+)?)+)')
+_SPACE_RE = re.compile(r'\s+')
 
-def extract_expression(query: str):
-    # Normalize unicode minus/multiply signs
+# Prebuilt safe eval environment (created once, reused every request)
+_SAFE_ENV = {"__builtins__": {}}
+
+# Operator to label map for O(1) lookup
+_OP_MAP = {'+': "sum", '-': "difference", '*': "product", '/': "quotient"}
+
+
+def solve_math(query: str) -> str | None:
+    # Normalize unicode operators inline
     query = query.replace('\u2212', '-').replace('\u00d7', '*').replace('\u00f7', '/')
-    # Support decimals in addition to integers
-    match = re.search(r'(\d+(?:\.\d+)?(?:\s*[\+\-\*\/]\s*\d+(?:\.\d+)?)+)', query)
-    if match:
-        return match.group(1)
-    return None
 
+    m = _EXPR_RE.search(query)
+    if not m:
+        return None
 
-def safe_eval(expr: str):
-    # Remove all spaces before eval
-    expr_clean = re.sub(r'\s+', '', expr)
+    expr_clean = _SPACE_RE.sub('', m.group(1))
+
     try:
-        result = eval(expr_clean, {"__builtins__": {}}, {})
-        return result
+        result = eval(expr_clean, _SAFE_ENV, {})
     except Exception:
         return None
 
-
-def get_operation(expr: str):
-    # Strip spaces to reliably detect operator
-    expr_clean = re.sub(r'\s+', '', expr)
-    if '+' in expr_clean:
-        return "sum"
-    elif '-' in expr_clean:
-        return "difference"
-    elif '*' in expr_clean:
-        return "product"
-    elif '/' in expr_clean:
-        return "quotient"
-    return "result"
-
-
-def solve_math(query: str):
-    expr = extract_expression(query)
-    if not expr:
+    if not isinstance(result, (int, float)):
         return None
 
-    result = safe_eval(expr)
-    if result is None:
-        return None
-
-    # Avoid division by zero or inf/nan
     if isinstance(result, float):
         if result != result or result in (float('inf'), float('-inf')):
             return None
-        if result.is_integer():
-            result = int(result)
-        else:
-            result = round(result, 10)
+        result = int(result) if result.is_integer() else round(result, 10)
 
-    operation = get_operation(expr)
+    # Detect operator from cleaned expr — first match wins
+    op = next((_OP_MAP[c] for c in expr_clean if c in _OP_MAP), "result")
 
-    return f"The {operation} is {result}."
+    return f"The {op} is {result}."
 
 
 @app.post("/v1/answer")
 async def answer(data: dict):
-    query = data.get("query", "")
-    assets = data.get("assets", [])
-
-    result = solve_math(query)
-
-    if result:
-        return {"output": result}
-
-    return {"output": "Unable to process the query."}
+    result = solve_math(data.get("query", ""))
+    return {"output": result if result else "Unable to process the query."}

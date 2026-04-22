@@ -1,76 +1,170 @@
+import os
 import re
 from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import Optional, Any
+from groq import Groq
 
 app = FastAPI()
 
+# ──────────────────────────────────────────────
+# Schema
+# ──────────────────────────────────────────────
+class QueryRequest(BaseModel):
+    query: Optional[str] = ""
+    assets: Optional[Any] = None
 
-def extract_expression(query: str):
-    # Normalize unicode minus/multiply signs
-    query = query.replace('\u2212', '-').replace('\u00d7', '*').replace('\u00f7', '/')
-    # Support decimals in addition to integers
-    match = re.search(r'(\d+(?:\.\d+)?(?:\s*[\+\-\*\/]\s*\d+(?:\.\d+)?)+)', query)
-    if match:
-        return match.group(1)
+
+# ──────────────────────────────────────────────
+# LLM CLIENT
+# ──────────────────────────────────────────────
+_client = None
+
+def get_client():
+    global _client
+    if _client is None:
+        _client = Groq(api_key=os.environ["GROQ_API_KEY"])
+    return _client
+
+
+SYSTEM_PROMPT = """You are a precise answer engine.
+
+Rules:
+- Answer directly.
+- No explanation.
+- No extra words.
+- Arithmetic must be correct.
+- Return only the final answer.
+"""
+
+
+# ──────────────────────────────────────────────
+# UTIL
+# ──────────────────────────────────────────────
+def clean(x):
+    try:
+        x = float(x)
+        return str(int(x)) if x == int(x) else str(round(x, 6))
+    except:
+        return x
+
+
+def assets_to_text(assets):
+    if not assets:
+        return ""
+    if isinstance(assets, list):
+        return " ".join(map(str, assets))
+    if isinstance(assets, dict):
+        return " ".join(map(str, assets.values()))
+    return str(assets)
+
+
+# ──────────────────────────────────────────────
+# OUTPUT NORMALIZER (CRITICAL)
+# ──────────────────────────────────────────────
+def normalize_output(text: str) -> str:
+    nums = re.findall(r'-?\d+(?:\.\d+)?', text)
+
+    if nums:
+        return f"The result is {clean(nums[0])}."
+
+    return "Unable to process."
+
+
+# ──────────────────────────────────────────────
+# RULE-BASED SOLVER (FAST PATH)
+# ──────────────────────────────────────────────
+def rule_solver(query, assets):
+    combined = (query + " " + assets_to_text(assets)).lower()
+
+    nums = list(map(int, re.findall(r'\d+', combined)))
+
+    if not nums:
+        return None
+
+    # subtract X from Y
+    if "subtract" in combined and "from" in combined and len(nums) >= 2:
+        return f"The result is {nums[1] - nums[0]}."
+
+    # division
+    if any(x in combined for x in ["divide", "divided", "/"]) and len(nums) >= 2:
+        if nums[1] == 0:
+            return "Unable to process."
+        return f"The result is {clean(nums[0] / nums[1])}."
+
+    # multiplication
+    if any(x in combined for x in ["multiply", "product", "*", "times"]) and len(nums) >= 2:
+        result = 1
+        for n in nums:
+            result *= n
+        return f"The result is {result}."
+
+    # addition (fallback default)
+    if len(nums) >= 2:
+        return f"The result is {sum(nums)}."
+
     return None
 
 
-def safe_eval(expr: str):
-    # Remove all spaces before eval
-    expr_clean = re.sub(r'\s+', '', expr)
+# ──────────────────────────────────────────────
+# LLM FALLBACK
+# ──────────────────────────────────────────────
+def llm_solver(query):
     try:
-        result = eval(expr_clean, {"__builtins__": {}}, {})
-        return result
-    except Exception:
-        return None
+        client = get_client()
+
+        response = client.chat.completions.create(
+            model=os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b"),
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": query},
+            ],
+            temperature=0.0,
+        )
+
+        raw = response.choices[0].message.content.strip()
+        return normalize_output(raw)
+
+    except:
+        return "Unable to process."
 
 
-def get_operation(expr: str):
-    # Strip spaces to reliably detect operator
-    expr_clean = re.sub(r'\s+', '', expr)
-    if '+' in expr_clean:
-        return "sum"
-    elif '-' in expr_clean:
-        return "difference"
-    elif '*' in expr_clean:
-        return "product"
-    elif '/' in expr_clean:
-        return "quotient"
-    return "result"
+# ──────────────────────────────────────────────
+# AGENT
+# ──────────────────────────────────────────────
+def agent(query, assets):
+    if not query or len(query.strip()) < 2:
+        return "Unable to process."
 
-
-def solve_math(query: str):
-    expr = extract_expression(query)
-    if not expr:
-        return None
-
-    result = safe_eval(expr)
-    if result is None:
-        return None
-
-    # Avoid division by zero or inf/nan
-    if isinstance(result, float):
-        if result != result or result in (float('inf'), float('-inf')):
-            return None
-        if result.is_integer():
-            result = int(result)
-        else:
-            result = round(result, 10)
-
-    operation = get_operation(expr)
-
-    return f"The {operation} is {result}."
-
-
-@app.post("/v1/answer")
-async def answer(data: dict):
-    query = data.get("query", "")
-    assets = data.get("assets", [])
-
-    result = solve_math(query)
-
+    # 1️⃣ rule-based first
+    result = rule_solver(query, assets)
     if result:
-        return {"output": result}
+        return result
 
-    return {"output": "Unable to process the query."}
+    # 2️⃣ LLM fallback
+    return llm_solver(query)
+
+
+# ──────────────────────────────────────────────
+# ENDPOINT
+# ──────────────────────────────────────────────
+@app.post("/v1/answer")
+async def answer(req: QueryRequest):
+    try:
+        output = agent(req.query or "", req.assets)
+        return {"output": output}
+    except:
+        return {"output": "Unable to process."}
+
+
+@app.get("/")
+async def health():
+    return {"status": "ok"}
+
+
+# ──────────────────────────────────────────────
+# LOCAL RUN
+# ──────────────────────────────────────────────
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000)

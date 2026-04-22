@@ -3,12 +3,15 @@ import re
 
 app = FastAPI()
 
-def solve_math(q):
-    match = re.search(r'(\d+)\s*\+\s*(\d+)', q)
+def solve_math(query: str):
+    # Handle addition like "What is 10 + 15?"
+    match = re.search(r'(\d+)\s*\+\s*(\d+)', query)
     if match:
         a, b = map(int, match.groups())
-        return f"The sum is {a+b}."
+        return f"The sum is {a + b}."
+    
     return None
+
 
 @app.post("/v1/answer")
 async def answer(data: dict):
@@ -17,6 +20,7 @@ async def answer(data: dict):
     result = solve_math(query)
 
     if result:
-        return {"answer": result}
+        return {"output": result}
 
-    return {"answer": "Cannot solve"}
+    # fallback (important so API never breaks)
+    return {"output": "Unable to process the query."}

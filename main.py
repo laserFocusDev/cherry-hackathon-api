@@ -5,7 +5,6 @@ app = FastAPI()
 
 
 def extract_expression(query: str):
-    # Extract full math expression (numbers + operators)
     match = re.search(r'(\d+(?:\s*[\+\-\*\/]\s*\d+)+)', query)
     if match:
         return match.group(1)
@@ -19,6 +18,18 @@ def safe_eval(expr: str):
         return None
 
 
+def get_operation(expr: str):
+    if "+" in expr:
+        return "sum"
+    elif "-" in expr:
+        return "difference"
+    elif "*" in expr:
+        return "product"
+    elif "/" in expr:
+        return "quotient"
+    return "result"
+
+
 def solve_math(query: str):
     expr = extract_expression(query)
     if not expr:
@@ -28,11 +39,13 @@ def solve_math(query: str):
     if result is None:
         return None
 
-    # clean formatting
+    # clean float
     if isinstance(result, float) and result.is_integer():
         result = int(result)
 
-    return f"The result is {result}."
+    operation = get_operation(expr)
+
+    return f"The {operation} is {result}."
 
 
 @app.post("/v1/answer")

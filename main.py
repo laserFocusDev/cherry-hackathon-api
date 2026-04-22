@@ -5,33 +5,43 @@ from typing import Optional, Any
 
 app = FastAPI()
 
-# ──────────────────────────────────────────────
-# Request schema
-# ──────────────────────────────────────────────
 class QueryRequest(BaseModel):
     query: str
     assets: Optional[Any] = None
 
 
-# ──────────────────────────────────────────────
-# Clean float → int
-# ──────────────────────────────────────────────
 def clean(value: float) -> str:
     if value == int(value):
         return str(int(value))
     return str(round(value, 6))
 
 
-# ──────────────────────────────────────────────
-# Core aggressive solver
-# ──────────────────────────────────────────────
-def solve_query(query: str) -> str:
-    q = query.lower()
+# 🔥 Convert assets → string safely
+def assets_to_text(assets: Any) -> str:
+    if assets is None:
+        return ""
 
-    # 🔥 Remove noise
+    if isinstance(assets, str):
+        return assets
+
+    if isinstance(assets, list):
+        return " ".join(str(x) for x in assets)
+
+    if isinstance(assets, dict):
+        return " ".join(str(v) for v in assets.values())
+
+    return str(assets)
+
+
+def solve_query(query: str, assets: Any) -> str:
+    # 🔥 Merge query + assets
+    combined = query + " " + assets_to_text(assets)
+    q = combined.lower()
+
+    # 🔥 Clean noise
     q = re.sub(r'[^\d+\-*/.\s]', ' ', q)
 
-    # 🔥 Normalize word operators
+    # 🔥 Normalize operators
     q = re.sub(r'\bdivided\s+by\b', '/', q)
     q = re.sub(r'\bmultiplied\s+by\b', '*', q)
     q = re.sub(r'\btimes\b', '*', q)
@@ -64,38 +74,29 @@ def solve_query(query: str) -> str:
         except:
             return "Unable to process."
 
-    # 🔥 FALLBACK 1 (very important)
+    # 🔥 FALLBACK using ALL numbers (query + assets)
     nums = re.findall(r'\d+', q)
+
     if len(nums) >= 2:
         a, b = int(nums[0]), int(nums[1])
         return f"The sum is {a + b}."
 
-    # 🔥 FINAL fallback (must match exactly)
     return "Unable to process."
 
 
-# ──────────────────────────────────────────────
-# REQUIRED ENDPOINT
-# ──────────────────────────────────────────────
 @app.post("/v1/answer")
 async def answer(req: QueryRequest):
     try:
-        return {"output": solve_query(req.query)}
+        return {"output": solve_query(req.query, req.assets)}
     except:
         return {"output": "Unable to process."}
 
 
-# ──────────────────────────────────────────────
-# HEALTH CHECK (Render safe)
-# ──────────────────────────────────────────────
 @app.get("/")
 async def health():
     return {"status": "ok"}
 
 
-# ──────────────────────────────────────────────
-# LOCAL RUN
-# ──────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
